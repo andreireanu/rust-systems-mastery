@@ -67,11 +67,11 @@ struct MessageStruct {
 #[tokio::main]
 async fn main() -> Result<(), AppError> {
     let urls = vec![
-        // "wss://nonexistent.com",                          // Wrong domain
-        // "wss://stream.binance.com:9999/ws/btcusdt@trade", // Wrong port
-        // "wss://definitely-not-real-123456.binance.com",   // DNS Failure
-        // "wss://expired.badssl.com",                       // Bad ssl
-        // "wss://stream.binance.com:9443/ws/INVALID",       // Invalid strem
+        "wss://nonexistent.com",                          // Wrong domain
+        "wss://stream.binance.com:9999/ws/btcusdt@trade", // Wrong port
+        "wss://definitely-not-real-123456.binance.com",   // DNS Failure
+        "wss://expired.badssl.com",                       // Bad ssl
+        "wss://stream.binance.com:9443/ws/INVALID",       // Invalid strem
         "wss://stream.binance.com:9443/ws/btcusdt@trade", // Correct web socket
     ];
     let sleep_times = vec![1000, 2000, 3000, 4000, 4000, 5000];
@@ -122,10 +122,16 @@ async fn main() -> Result<(), AppError> {
                     TungsteniteError::Http(err_box) => {
                         let response = *err_box;
                         let (parts, body) = response.into_parts();
-                        let body_string =
-                            String::from_utf8(body.ok_or("Error")?).expect("Invalid UTF-8");
-                        println!("Web Socket HTTP Error Parts: {:?}", parts);
-                        println!("Web Socket HTTP Error Body: {:?}", body_string);
+                        let body_string_result = String::from_utf8(body.ok_or("Error")?);
+                        match body_string_result {
+                            Ok(body_string) => {
+                                println!("WebParts Socket HTTP Error Parts: {:?}", parts);
+                                println!("Web Socket HTTP Error Body: {:?}", body_string);
+                            }
+                            Err(err) => {
+                                println!("Web Socket HTTP Error Body decode error: {:?}", err);
+                            }
+                        }
                     }
                     TungsteniteError::Tls(err) => {
                         println!("Web Socket TSL Err: {:?}", err);
