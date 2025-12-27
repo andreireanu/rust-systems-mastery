@@ -71,7 +71,7 @@ async fn main() -> Result<(), AppError> {
         "wss://stream.binance.com:9999/ws/btcusdt@trade", // Wrong port
         "wss://definitely-not-real-123456.binance.com",   // DNS Failure
         "wss://expired.badssl.com",                       // Bad ssl
-        "wss://stream.binance.com:9443/ws/INVALID",       // Invalid strem
+        "wss://stream.binance.com:9443/ws/INVALID",       // Invalid stream
         "wss://stream.binance.com:9443/ws/btcusdt@trade", // Correct web socket
     ];
     let sleep_times = vec![1000, 2000, 3000, 4000, 4000, 5000];
