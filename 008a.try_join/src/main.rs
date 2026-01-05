@@ -16,11 +16,13 @@ pub enum AppError {
     Custom(String),
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub struct USD {
     usd: f64,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub struct Coin {
     #[serde(flatten)]
