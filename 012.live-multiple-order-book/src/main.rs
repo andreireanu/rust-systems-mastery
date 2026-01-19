@@ -19,7 +19,8 @@ enum AppError {
     Ws(tokio_tungstenite::tungstenite::Error),
     Timeout(Elapsed),
     Serde(serde_json::Error),
-    Parse(std::num::ParseFloatError),
+    FloatParse(std::num::ParseFloatError),
+    IntParse(std::num::ParseIntError),
     KrakenWrongFormat,
 }
 
@@ -53,16 +54,18 @@ enum KrakenData {
 struct OrderBook {
     bids: BTreeMap<OrderedFloat<f64>, (f64, String)>,
     asks: BTreeMap<OrderedFloat<f64>, (f64, String)>,
-    last_update_id: u64,
+    last_update_id: f64,
 }
 
 impl fmt::Display for OrderBook {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let _ = writeln!(f, "ASK LEN: {:?}", self.asks.len());
+        let _ = writeln!(f, "BIDS LEN: {:?}", self.bids.len());
         let mut out = format!(
             "=== Order Book (Updated at: {})===\n ASKS:\n",
             self.last_update_id
         );
-        for (price, data) in self.asks.iter().skip(self.asks.len() - DEPTH) {
+        for (price, data) in self.asks.iter().take(DEPTH) {
             out.push_str(&format!(
                 "  {:>8.2} | {:>6.5} | {:<8}\n",
                 price.into_inner(),
@@ -94,11 +97,11 @@ impl OrderBook {
         Self {
             bids: BTreeMap::new(),
             asks: BTreeMap::new(),
-            last_update_id: 0,
+            last_update_id: 0.0,
         }
     }
 
-    fn update_last_update_id(&mut self, last_update_id: u64) {
+    fn update_last_update_id(&mut self, last_update_id: f64) {
         self.last_update_id = last_update_id;
     }
 
@@ -154,7 +157,8 @@ impl std::fmt::Display for AppError {
             AppError::Ws(e) => write!(f, "WebSocket error: {}", e),
             AppError::Timeout(e) => write!(f, "Connection timeout: {}", e),
             AppError::Serde(e) => write!(f, "JSON parse error: {}", e),
-            AppError::Parse(e) => write!(f, "Float parse error: {}", e),
+            AppError::FloatParse(e) => write!(f, "Float parse error: {}", e),
+            AppError::IntParse(e) => write!(f, "Int parse error: {}", e),
             AppError::KrakenWrongFormat => write!(f, "Kraken sent different format"),
         }
     }
@@ -182,7 +186,13 @@ impl From<serde_json::Error> for AppError {
 
 impl From<std::num::ParseFloatError> for AppError {
     fn from(value: std::num::ParseFloatError) -> Self {
-        AppError::Parse(value)
+        AppError::FloatParse(value)
+    }
+}
+
+impl From<std::num::ParseIntError> for AppError {
+    fn from(value: std::num::ParseIntError) -> Self {
+        AppError::IntParse(value)
     }
 }
 
@@ -206,7 +216,8 @@ async fn main() -> Result<(), AppError> {
     kraken_ws_socket
         .send(Message::Text(sub_msg_text.into()))
         .await?;
-    let mut order_book: OrderBook = OrderBook::new();
+    let mut binance_order_book: OrderBook = OrderBook::new();
+    let mut kraken_order_book: OrderBook = OrderBook::new();
     let mut interval = interval(Duration::from_secs(1));
     loop {
         select! {
@@ -215,17 +226,17 @@ async fn main() -> Result<(), AppError> {
                 match msg_recv {
                     Message::Text(msg_recv_text) => {
                         let msg: BinanceMessageDeserialized = serde_json::from_str(&msg_recv_text)?;
-                        order_book.update_last_update_id(msg.lastUpdateId);
+                        binance_order_book.asks.clear();
+                        binance_order_book.bids.clear();
+                        binance_order_book.update_last_update_id(msg.lastUpdateId as f64);
                         for pair in msg.asks.iter() {
-                            order_book.update_ask(pair.0.parse()?, pair.1.parse()?, "Binance".to_string());
+                            binance_order_book.update_ask(pair.0.parse()?, pair.1.parse()?, "Binance".to_string());
                         }
                         for pair in msg.bids.iter() {
-                            order_book.update_bid(pair.0.parse()?, pair.1.parse()?, "Binance".to_string());
+                            binance_order_book.update_bid(pair.0.parse()?, pair.1.parse()?, "Binance".to_string());
                         }
                     }
-                    Message::Ping(_) | Message::Pong(_) => {
-                        println!("PING or PONG");
-                    }
+                    Message::Ping(_) | Message::Pong(_) => {}
                     _ => {}
                 }
             }
@@ -241,38 +252,64 @@ async fn main() -> Result<(), AppError> {
                                     .map_err(|_| AppError::KrakenWrongFormat)?;
                             match kraken_data {
                                 KrakenData::Snapshot{as_, bs} => {
-                                    for (price, volume, _ ) in as_.iter() {
-                                        order_book.update_ask(price.parse()?, volume.parse()?, "Kraken".to_string());
-                                    };
-                                    for (price, volume, _ ) in bs.iter() {
-                                        order_book.update_bid(price.parse()?, volume.parse()?, "Kraken".to_string());
+                                    kraken_order_book.asks.clear();
+                                    kraken_order_book.bids.clear();
+                                    let mut max_ts = 0f64;
+
+                                    for (price, volume, ts) in as_ {
+                                        kraken_order_book.update_ask(price.parse()?, volume.parse()?, "Kraken".to_string());
+                                        max_ts = max_ts.max(ts.parse::<f64>()?);
                                     }
-                                },
-                                KrakenData::UpdateAsk{ a } => {
-                                    for (price, volume, _) in a {
-                                        let price: f64 = price.parse()?;
-                                        let volume: f64 = volume.parse()?;
-                                        order_book.update_ask(price, volume, "Kraken".to_string());
+                                    for (price, volume, ts) in bs {
+                                        kraken_order_book.update_bid(price.parse()?, volume.parse()?, "Kraken".to_string());
+                                        max_ts = max_ts.max(ts.parse::<f64>()?);
                                     }
+
+                                    kraken_order_book.last_update_id = max_ts;
                                 },
-                                KrakenData::UpdateBid{ b } =>  {
-                                    for (price, volume, _) in b {
-                                    let price: f64 = price.parse()?;
-                                    let volume: f64 = volume.parse()?;
-                                    order_book.update_bid(price, volume, "Kraken".to_string());
-                                }},
+                                KrakenData::UpdateAsk { a } => {
+                                    let mut max_ts: f64 = kraken_order_book.last_update_id;
+
+                                    for (price, volume, ts) in a {
+                                        let p: f64 = price.parse()?;
+                                        let q: f64 = volume.parse()?;
+                                        kraken_order_book.update_ask(p, q, "Kraken".to_string());
+
+                                        let t: f64 = ts.parse()?;
+                                        if t > max_ts {
+                                            max_ts = t;
+                                        }
+                                    }
+
+                                    kraken_order_book.last_update_id = max_ts;
+                                }
+                                KrakenData::UpdateBid { b } => {
+                                    let mut max_ts: f64 = kraken_order_book.last_update_id;
+
+                                    for (price, volume, ts) in b {
+                                        let p: f64 = price.parse()?;
+                                        let q: f64 = volume.parse()?;
+                                        kraken_order_book.update_bid(p, q, "Kraken".to_string());
+
+                                        let t: f64 = ts.parse()?;
+                                        if t > max_ts {
+                                            max_ts = t;
+                                        }
+                                    }
+
+                                    kraken_order_book.last_update_id = max_ts;
+                                }
                                 KrakenData::Other(_) => {}
                             }
                         }
-                    },
-                   Message::Ping(_) | Message::Pong(_) => {
-                        println!("PING or PONG");
-                    },
+                    }
+                   Message::Ping(_) | Message::Pong(_) => {}
                     _ => {}
                 }
                 }
             _ = interval.tick() => {
-                println!("{}", order_book);
+                println!("{}", binance_order_book);
+                println!("{}", kraken_order_book);
             }
         }
     }
