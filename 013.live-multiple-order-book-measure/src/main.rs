@@ -1,18 +1,16 @@
 use circular_buffer::CircularBuffer;
 use futures_util::{SinkExt, StreamExt};
-use ordered_float::OrderedFloat;
+use live_order_book::order_book::OrderBook;
 use serde::Deserialize;
 use serde_json::Value;
 use serde_json::json;
 use std::time::Instant;
-use std::{collections::BTreeMap, fmt};
 use tokio::{
     select,
     time::{Duration, error::Elapsed, interval, timeout},
 };
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
-const DEPTH: usize = 10;
 type String2 = (String, String);
 type String3 = (String, String, String);
 
@@ -52,101 +50,6 @@ enum KrakenData {
     Other(Value),
 }
 
-#[allow(dead_code)]
-struct OrderBook {
-    bids: BTreeMap<OrderedFloat<f64>, (f64, String)>,
-    asks: BTreeMap<OrderedFloat<f64>, (f64, String)>,
-    last_update_id: f64,
-}
-
-impl fmt::Display for OrderBook {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let _ = writeln!(f, "ASK LEN: {:?}", self.asks.len());
-        let _ = writeln!(f, "BIDS LEN: {:?}", self.bids.len());
-        let mut out = format!(
-            "=== Order Book (Updated at: {})===\n ASKS:\n",
-            self.last_update_id
-        );
-        for (price, data) in self.asks.iter().take(DEPTH) {
-            out.push_str(&format!(
-                "  {:>8.2} | {:>6.5} | {:<8}\n",
-                price.into_inner(),
-                data.0,
-                data.1
-            ));
-        }
-        if let Some(spread) = self.spread() {
-            out.push_str(&format!("---SPREAD: {:.2}---\n", spread));
-        }
-        if let Some(mid_price) = self.mid_price() {
-            out.push_str(&format!("---MID PRICE: {:.2}---\n", mid_price));
-        }
-        out.push_str(" BIDS:\n");
-        for (price, data) in self.bids.iter().rev().take(DEPTH) {
-            out.push_str(&format!(
-                "  {:>8.2} | {:>6.5} | {:<8}\n",
-                price.into_inner(),
-                data.0,
-                data.1
-            ));
-        }
-        write!(f, "{}", out.as_str())
-    }
-}
-
-impl OrderBook {
-    fn new() -> Self {
-        Self {
-            bids: BTreeMap::new(),
-            asks: BTreeMap::new(),
-            last_update_id: 0.0,
-        }
-    }
-
-    fn update_last_update_id(&mut self, last_update_id: f64) {
-        self.last_update_id = last_update_id;
-    }
-
-    fn update_bid(&mut self, price: f64, quantity: f64, exchange: String) {
-        if quantity == 0. {
-            self.bids.remove(&OrderedFloat(price));
-            return;
-        };
-        self.bids.insert(OrderedFloat(price), (quantity, exchange));
-    }
-
-    fn update_ask(&mut self, price: f64, quantity: f64, exchange: String) {
-        if quantity == 0. {
-            self.asks.remove(&OrderedFloat(price));
-            return;
-        };
-        self.asks.insert(OrderedFloat(price), (quantity, exchange));
-    }
-
-    fn best_bid(&self) -> Option<f64> {
-        let bid = self.bids.last_key_value().map(|(k, _v)| k);
-        bid.map(|val| (*val).into_inner())
-    }
-
-    fn best_ask(&self) -> Option<f64> {
-        let ask = self.asks.first_key_value().map(|(k, _v)| k);
-        ask.map(|val| (*val).into_inner())
-    }
-
-    fn spread(&self) -> Option<f64> {
-        match (self.best_ask(), self.best_bid()) {
-            (Some(ask), Some(bid)) => Some(ask - bid),
-            _ => None,
-        }
-    }
-
-    fn mid_price(&self) -> Option<f64> {
-        match (self.best_ask(), self.best_bid()) {
-            (Some(ask), Some(bid)) => Some((ask + bid) / 2.),
-            _ => None,
-        }
-    }
-}
 impl std::fmt::Debug for AppError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(f, "{}", self) // Delegates to Display
