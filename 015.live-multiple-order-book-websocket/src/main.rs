@@ -10,9 +10,10 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
+use tokio::sync::broadcast::error::RecvError;
 use tokio::{
     select,
-    time::{Duration, interval, timeout},
+    time::{Duration, timeout},
 };
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
@@ -45,22 +46,6 @@ enum KrakenData {
     Other(Value),
 }
 
-fn percentiles(buffer: &CircularBuffer<200, u128>) -> Option<(u128, u128, u128)> {
-    if buffer.is_empty() {
-        return None;
-    }
-
-    let mut buf_vec: Vec<u128> = buffer.iter().copied().collect();
-    buf_vec.sort_unstable();
-
-    let len = buf_vec.len();
-    let p50 = buf_vec[len * 50 / 100];
-    let p95 = buf_vec[len * 95 / 100];
-    let p99 = buf_vec[len * 99 / 100];
-
-    Some((p50, p95, p99))
-}
-
 #[derive(Clone, Serialize)]
 struct OrderBookUpdate {
     book: OrderBook,
@@ -89,7 +74,6 @@ async fn main() -> Result<(), AppError> {
 
     let binance_order_book = Arc::new(Mutex::new(OrderBook::new()));
     let kraken_order_book = Arc::new(Mutex::new(OrderBook::new()));
-    let mut interval = interval(Duration::from_secs(1));
     let mut binance_buf = CircularBuffer::<200, u128>::new();
     let mut kraken_buf = CircularBuffer::<200, u128>::new();
     let (tx, _) = broadcast::channel(200);
@@ -114,6 +98,9 @@ async fn main() -> Result<(), AppError> {
                             binance_order_book_locked.update_bid(pair.0.parse()?, pair.1.parse()?, "Binance".to_string());
                         }
                         binance_buf.push_back(now.elapsed().as_micros());
+                        tx.send(OrderBookUpdate {
+                            book: binance_order_book_locked.clone()
+                        }).ok();
                     }
                     Message::Ping(_) | Message::Pong(_) => {}
                     _ => {}
@@ -147,6 +134,9 @@ async fn main() -> Result<(), AppError> {
                                     }
 
                                     kraken_order_book_locked.last_update_id = max_ts;
+                                    tx.send(OrderBookUpdate {
+                                        book: kraken_order_book_locked.clone()
+                                    }).ok();
                                 },
                                 KrakenData::UpdateAsk { a } => {
                                     let mut kraken_order_book_locked = kraken_order_book.lock().await;
@@ -165,6 +155,9 @@ async fn main() -> Result<(), AppError> {
                                     }
 
                                     kraken_order_book_locked.last_update_id = max_ts;
+                                    tx.send(OrderBookUpdate {
+                                        book: kraken_order_book_locked.clone()
+                                    }).ok();
                                 }
                                 KrakenData::UpdateBid { b } => {
                                     let mut kraken_order_book_locked = kraken_order_book.lock().await;
@@ -182,6 +175,9 @@ async fn main() -> Result<(), AppError> {
                                     }
 
                                     kraken_order_book_locked.last_update_id = max_ts;
+                                    tx.send(OrderBookUpdate {
+                                        book: kraken_order_book_locked.clone()
+                                    }).ok();
                                 }
                                 KrakenData::Other(_) => {}
                             }
@@ -192,30 +188,27 @@ async fn main() -> Result<(), AppError> {
                     _ => {}
                 }
             }
-            Ok((tcp_stream, _)) = listener.accept() => {
+            Ok((tcp_stream, _addr)) = listener.accept() => {
                 let mut rx = tx.subscribe();
                 tokio::spawn(async move {
                     if let Ok(mut ws_stream) = tokio_tungstenite::accept_async(tcp_stream).await {
-                        while let Ok(update) = rx.recv().await {
-                            let json = serde_json::to_string(&update).unwrap();
-                            let msg = Message::text(json);
-                            if ws_stream.send(msg).await.is_err() {
-                                break;
+                        loop {
+                            match rx.recv().await {
+                                Ok(update) => {
+                                    let json = serde_json::to_string(&update).unwrap();
+                                    if ws_stream.send(Message::text(json)).await.is_err() {
+                                        break;
+                                    }
+                                }
+                                Err(RecvError::Lagged(n)) => {
+                                    println!("Client lagged, skipped {} messages", n);
+                                    continue;
+                                }
+                                Err(_) => break,
                             }
                         }
                     }
                 });
-            }
-            _ = interval.tick() => {
-                // ticks += 1;
-                let binance_book = binance_order_book.lock().await;
-                let kraken_book = kraken_order_book.lock().await;
-                tx.send(OrderBookUpdate {
-                    book: binance_book.clone()
-                }).ok();
-                tx.send(OrderBookUpdate {
-                    book: kraken_book.clone()
-                }).ok();
             }
         }
     }
