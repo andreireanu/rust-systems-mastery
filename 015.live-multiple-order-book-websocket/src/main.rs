@@ -1,3 +1,4 @@
+use crate::Pair::{BTCUSD, XBTUSD};
 use circular_buffer::CircularBuffer;
 use futures_util::lock::Mutex;
 use futures_util::{SinkExt, StreamExt};
@@ -6,6 +7,7 @@ use live_order_book::order_book::OrderBook;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use serde_json::json;
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::net::TcpListener;
@@ -46,9 +48,22 @@ enum KrakenData {
     Other(Value),
 }
 
+#[derive(Clone, Serialize, Deserialize, Eq, PartialEq, Hash)]
+enum Pair {
+    BTCUSD,
+    XBTUSD,
+}
+
 #[derive(Clone, Serialize)]
 struct OrderBookUpdate {
+    pair: Pair,
     book: OrderBook,
+}
+
+#[derive(Deserialize)]
+struct ClientMessage {
+    action: String, // "subscribe" or "unsubscribe"
+    pair: Pair,     // "BTC/USDT"
 }
 
 #[tokio::main]
@@ -99,6 +114,7 @@ async fn main() -> Result<(), AppError> {
                         }
                         binance_buf.push_back(now.elapsed().as_micros());
                         tx.send(OrderBookUpdate {
+                            pair: BTCUSD,
                             book: binance_order_book_locked.clone()
                         }).ok();
                     }
@@ -135,6 +151,7 @@ async fn main() -> Result<(), AppError> {
 
                                     kraken_order_book_locked.last_update_id = max_ts;
                                     tx.send(OrderBookUpdate {
+                                        pair: XBTUSD,
                                         book: kraken_order_book_locked.clone()
                                     }).ok();
                                 },
@@ -156,6 +173,7 @@ async fn main() -> Result<(), AppError> {
 
                                     kraken_order_book_locked.last_update_id = max_ts;
                                     tx.send(OrderBookUpdate {
+                                        pair: XBTUSD,
                                         book: kraken_order_book_locked.clone()
                                     }).ok();
                                 }
@@ -176,6 +194,7 @@ async fn main() -> Result<(), AppError> {
 
                                     kraken_order_book_locked.last_update_id = max_ts;
                                     tx.send(OrderBookUpdate {
+                                        pair: XBTUSD,
                                         book: kraken_order_book_locked.clone()
                                     }).ok();
                                 }
@@ -190,21 +209,51 @@ async fn main() -> Result<(), AppError> {
             }
             Ok((tcp_stream, _addr)) = listener.accept() => {
                 let mut rx = tx.subscribe();
+                let mut subscriptions: HashSet<Pair> = HashSet::new();
                 tokio::spawn(async move {
                     if let Ok(mut ws_stream) = tokio_tungstenite::accept_async(tcp_stream).await {
                         loop {
-                            match rx.recv().await {
-                                Ok(update) => {
-                                    let json = serde_json::to_string(&update).unwrap();
-                                    if ws_stream.send(Message::text(json)).await.is_err() {
-                                        break;
+                            select! {
+                                rx_receive = rx.recv() => {
+                                    match rx_receive {
+                                        Ok(update) => {
+                                            let json = serde_json::to_string(&update).unwrap();
+                                            if ws_stream.send(Message::text(json)).await.is_err() {
+                                                break;
+                                            }
+                                        }
+                                        Err(RecvError::Lagged(n)) => {
+                                            println!("Client lagged, skipped {} messages", n);
+                                            continue;
+                                        }
+                                        Err(_) => break,
                                     }
                                 }
-                                Err(RecvError::Lagged(n)) => {
-                                    println!("Client lagged, skipped {} messages", n);
-                                    continue;
+                                ws_stream_receive = ws_stream.next() => {
+                                    match ws_stream_receive {
+                                        Some(Ok(msg_recv)) => {
+                                           if let Message::Text(msg) = msg_recv {
+                                                    match serde_json::from_str::<ClientMessage>(&msg) {
+                                                        Ok(client_message) => {
+                                                            if client_message.action == "subscribe" {
+                                                                subscriptions.insert(client_message.pair);
+                                                            }
+                                                            // if client_message.action == "unsub"
+                                                        }
+                                                        Err(e) => {
+                                                            println!("Client message error: {}", e);
+                                                        }
+                                                    }
+                                                }
+                                        }
+                                        Some(Err(e)) => {
+                                            println!("WebSocker error: {}", e);
+                                            break;
+                                        }
+                                        None => {}
+
+                                    }
                                 }
-                                Err(_) => break,
                             }
                         }
                     }
