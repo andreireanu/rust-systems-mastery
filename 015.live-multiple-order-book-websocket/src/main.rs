@@ -48,7 +48,8 @@ enum KrakenData {
     Other(Value),
 }
 
-#[derive(Clone, Serialize, Deserialize, Eq, PartialEq, Hash)]
+#[allow(clippy::upper_case_acronyms)]
+#[derive(Clone, Serialize, Deserialize, Eq, PartialEq, Hash, Debug)]
 enum Pair {
     BTCUSD,
     XBTUSD,
@@ -102,21 +103,24 @@ async fn main() -> Result<(), AppError> {
                     Message::Text(msg_recv_text) => {
                         let now = Instant::now();
                         let msg: BinanceMessageDeserialized = serde_json::from_str(&msg_recv_text)?;
-                        let mut binance_order_book_locked = binance_order_book.lock().await;
-                        binance_order_book_locked.asks.clear();
-                        binance_order_book_locked.bids.clear();
-                        binance_order_book_locked.update_last_update_id(msg.lastUpdateId as f64);
-                        for pair in msg.asks.iter() {
-                            binance_order_book_locked.update_ask(pair.0.parse()?, pair.1.parse()?, "Binance".to_string());
-                        }
-                        for pair in msg.bids.iter() {
-                            binance_order_book_locked.update_bid(pair.0.parse()?, pair.1.parse()?, "Binance".to_string());
-                        }
+
+                        let book_update = {
+                            let mut binance_order_book_locked = binance_order_book.lock().await;
+                            binance_order_book_locked.asks.clear();
+                            binance_order_book_locked.bids.clear();
+                            binance_order_book_locked.update_last_update_id(msg.lastUpdateId as f64);
+                            for pair in msg.asks.iter() {
+                                binance_order_book_locked.update_ask(pair.0.parse()?, pair.1.parse()?, "Binance".to_string());
+                            }
+                            for pair in msg.bids.iter() {
+                                binance_order_book_locked.update_bid(pair.0.parse()?, pair.1.parse()?, "Binance".to_string());
+                            }
+                            binance_order_book_locked.clone()
+                        };
                         binance_buf.push_back(now.elapsed().as_micros());
                         tx.send(OrderBookUpdate {
                             pair: BTCUSD,
-                            book: binance_order_book_locked.clone()
-                        }).ok();
+                            book:  book_update}).ok();
                     }
                     Message::Ping(_) | Message::Pong(_) => {}
                     _ => {}
@@ -135,67 +139,74 @@ async fn main() -> Result<(), AppError> {
                                     .map_err(|_| AppError::KrakenWrongFormat)?;
                             match kraken_data {
                                 KrakenData::Snapshot{as_, bs} => {
-                                    let mut kraken_order_book_locked = kraken_order_book.lock().await;
-                                    kraken_order_book_locked.asks.clear();
-                                    kraken_order_book_locked.bids.clear();
-                                    let mut max_ts = 0f64;
+                                    let book_update = {
+                                        let mut kraken_order_book_locked = kraken_order_book.lock().await;
+                                        kraken_order_book_locked.asks.clear();
+                                        kraken_order_book_locked.bids.clear();
+                                        let mut max_ts = 0f64;
 
-                                    for (price, volume, ts) in as_ {
-                                        kraken_order_book_locked.update_ask(price.parse()?, volume.parse()?, "Kraken".to_string());
-                                        max_ts = max_ts.max(ts.parse::<f64>()?);
-                                    }
-                                    for (price, volume, ts) in bs {
-                                        kraken_order_book_locked.update_bid(price.parse()?, volume.parse()?, "Kraken".to_string());
-                                        max_ts = max_ts.max(ts.parse::<f64>()?);
-                                    }
-
-                                    kraken_order_book_locked.last_update_id = max_ts;
+                                        for (price, volume, ts) in as_ {
+                                            kraken_order_book_locked.update_ask(price.parse()?, volume.parse()?, "Kraken".to_string());
+                                            max_ts = max_ts.max(ts.parse::<f64>()?);
+                                        }
+                                        for (price, volume, ts) in bs {
+                                            kraken_order_book_locked.update_bid(price.parse()?, volume.parse()?, "Kraken".to_string());
+                                            max_ts = max_ts.max(ts.parse::<f64>()?);
+                                        }
+                                        kraken_order_book_locked.last_update_id = max_ts;
+                                        kraken_order_book_locked.clone()
+                                    };
                                     tx.send(OrderBookUpdate {
                                         pair: XBTUSD,
-                                        book: kraken_order_book_locked.clone()
+                                        book: book_update
                                     }).ok();
                                 },
                                 KrakenData::UpdateAsk { a } => {
-                                    let mut kraken_order_book_locked = kraken_order_book.lock().await;
-                                    let mut max_ts: f64 = kraken_order_book_locked.last_update_id;
-
-                                    for (price, volume, ts) in a {
-                                        let p: f64 = price.parse()?;
-                                        let q: f64 = volume.parse()?;
+                                    let book_update = {
                                         let mut kraken_order_book_locked = kraken_order_book.lock().await;
-                                        kraken_order_book_locked.update_ask(p, q, "Kraken".to_string());
+                                        let mut max_ts: f64 = kraken_order_book_locked.last_update_id;
 
-                                        let t: f64 = ts.parse()?;
-                                        if t > max_ts {
-                                            max_ts = t;
+                                        for (price, volume, ts) in a {
+                                            let p: f64 = price.parse()?;
+                                            let q: f64 = volume.parse()?;
+                                            kraken_order_book_locked.update_ask(p, q, "Kraken".to_string());
+
+                                            let t: f64 = ts.parse()?;
+                                            if t > max_ts {
+                                                max_ts = t;
+                                            }
                                         }
-                                    }
 
-                                    kraken_order_book_locked.last_update_id = max_ts;
+                                        kraken_order_book_locked.last_update_id = max_ts;
+                                        kraken_order_book_locked.clone()
+                                    };
                                     tx.send(OrderBookUpdate {
                                         pair: XBTUSD,
-                                        book: kraken_order_book_locked.clone()
+                                        book: book_update
                                     }).ok();
                                 }
                                 KrakenData::UpdateBid { b } => {
-                                    let mut kraken_order_book_locked = kraken_order_book.lock().await;
-                                    let mut max_ts: f64 = kraken_order_book_locked.last_update_id;
+                                    let book_update = {
+                                        let mut kraken_order_book_locked = kraken_order_book.lock().await;
+                                        let mut max_ts: f64 = kraken_order_book_locked.last_update_id;
 
-                                    for (price, volume, ts) in b {
-                                        let p: f64 = price.parse()?;
-                                        let q: f64 = volume.parse()?;
-                                        kraken_order_book_locked.update_bid(p, q, "Kraken".to_string());
+                                        for (price, volume, ts) in b {
+                                            let p: f64 = price.parse()?;
+                                            let q: f64 = volume.parse()?;
+                                            kraken_order_book_locked.update_bid(p, q, "Kraken".to_string());
 
-                                        let t: f64 = ts.parse()?;
-                                        if t > max_ts {
-                                            max_ts = t;
+                                            let t: f64 = ts.parse()?;
+                                            if t > max_ts {
+                                                max_ts = t;
+                                            }
                                         }
-                                    }
 
-                                    kraken_order_book_locked.last_update_id = max_ts;
+                                        kraken_order_book_locked.last_update_id = max_ts;
+                                        kraken_order_book_locked.clone()
+                                    };
                                     tx.send(OrderBookUpdate {
                                         pair: XBTUSD,
-                                        book: kraken_order_book_locked.clone()
+                                        book: book_update
                                     }).ok();
                                 }
                                 KrakenData::Other(_) => {}
@@ -208,18 +219,21 @@ async fn main() -> Result<(), AppError> {
                 }
             }
             Ok((tcp_stream, _addr)) = listener.accept() => {
+                println!("Client connected!");
                 let mut rx = tx.subscribe();
-                let mut subscriptions: HashSet<Pair> = HashSet::new();
                 tokio::spawn(async move {
+                    let mut subscriptions: HashSet<Pair> = HashSet::new();
                     if let Ok(mut ws_stream) = tokio_tungstenite::accept_async(tcp_stream).await {
                         loop {
                             select! {
                                 rx_receive = rx.recv() => {
                                     match rx_receive {
                                         Ok(update) => {
-                                            let json = serde_json::to_string(&update).unwrap();
-                                            if ws_stream.send(Message::text(json)).await.is_err() {
-                                                break;
+                                            if subscriptions.contains(&update.pair) {
+                                                let json = serde_json::to_string(&update).unwrap();
+                                                if ws_stream.send(Message::text(json)).await.is_err() {
+                                                    break;
+                                                }
                                             }
                                         }
                                         Err(RecvError::Lagged(n)) => {
@@ -231,27 +245,30 @@ async fn main() -> Result<(), AppError> {
                                 }
                                 ws_stream_receive = ws_stream.next() => {
                                     match ws_stream_receive {
-                                        Some(Ok(msg_recv)) => {
-                                           if let Message::Text(msg) = msg_recv {
-                                                    match serde_json::from_str::<ClientMessage>(&msg) {
-                                                        Ok(client_message) => {
-                                                            if client_message.action == "subscribe" {
-                                                                subscriptions.insert(client_message.pair);
-                                                            }
-                                                            // if client_message.action == "unsub"
+                                        Some(Ok(Message::Text(msg_recv))) => {
+                                            println!("Raw message from client: {}", msg_recv);
+                                                match serde_json::from_str::<ClientMessage>(&msg_recv) {
+                                                    Ok(client_message) => {
+                                                        if client_message.action == "subscribe" {
+                                                            subscriptions.insert(client_message.pair.clone());
+                                                            println!("Client subscribed to {:?}", client_message.pair);
+                                                        } else if client_message.action == "unsubscribe" {
+                                                            subscriptions.remove(&client_message.pair);
                                                         }
-                                                        Err(e) => {
-                                                            println!("Client message error: {}", e);
-                                                        }
+                                                    }
+                                                    Err(e) => {
+                                                        println!("Client message error: {}", e);
                                                     }
                                                 }
                                         }
+                                        Some(Ok(_)) => {}
                                         Some(Err(e)) => {
                                             println!("WebSocker error: {}", e);
                                             break;
                                         }
-                                        None => {}
-
+                                        None => {
+                                            break;
+                                        }
                                     }
                                 }
                             }
