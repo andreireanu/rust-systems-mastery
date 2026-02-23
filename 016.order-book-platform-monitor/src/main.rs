@@ -1,8 +1,8 @@
 use crate::Pair::{BTCUSD, XBTUSD};
-use circular_buffer::CircularBuffer;
 use futures_util::lock::Mutex;
 use futures_util::{SinkExt, StreamExt};
 use live_order_book::errors::AppError;
+use live_order_book::metrics::ExchangeMetrics;
 use live_order_book::order_book::OrderBook;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -18,7 +18,7 @@ use tokio::{
     time::{Duration, interval, timeout},
 };
 use tokio_tungstenite::{connect_async, tungstenite::Message};
-use tracing::{debug, error, info, info_span, trace, warn};
+use tracing::{error, info, info_span, warn};
 use tracing_subscriber;
 
 type String2 = (String, String);
@@ -69,22 +69,6 @@ struct ClientMessage {
     pair: Pair,     // "BTC/USDT"
 }
 
-fn percentiles(buffer: &CircularBuffer<200, u128>) -> Option<(u128, u128, u128)> {
-    if buffer.is_empty() {
-        return None;
-    }
-
-    let mut buf_vec: Vec<u128> = buffer.iter().copied().collect();
-    buf_vec.sort_unstable();
-
-    let len = buf_vec.len();
-    let p50 = buf_vec[len * 50 / 100];
-    let p95 = buf_vec[len * 95 / 100];
-    let p99 = buf_vec[len * 99 / 100];
-
-    Some((p50, p95, p99))
-}
-
 #[tokio::main]
 async fn main() -> Result<(), AppError> {
     // Initialize tracing subscriber
@@ -120,11 +104,11 @@ async fn main() -> Result<(), AppError> {
     let kraken_order_book = Arc::new(Mutex::new(OrderBook::new()));
 
     // Metrics
-    let mut binance_buf = CircularBuffer::<200, u128>::new();
-    let mut kraken_buf = CircularBuffer::<200, u128>::new();
+    let mut binance_metrics = Arc::new(ExchangeMetrics::new());
+    let mut kraken_metrics = Arc::new(ExchangeMetrics::new());
+
+    // Update intervals
     let mut interval = interval(Duration::from_secs(1));
-    let mut binance_msg_no = 0;
-    let mut kraken_msg_no = 0;
     let mut ticks = 0;
 
     // Single sender multiple receiver channel
@@ -140,7 +124,7 @@ async fn main() -> Result<(), AppError> {
                 match msg_recv {
                     Message::Text(msg_recv_text) => {
                         let now = Instant::now();
-                        binance_msg_no += 1;
+                        (*Arc::get_mut(&mut binance_metrics).unwrap()).increment_msg_no();
                         let msg: BinanceMessageDeserialized = serde_json::from_str(&msg_recv_text)?;
 
                         let book_update = {
@@ -156,7 +140,7 @@ async fn main() -> Result<(), AppError> {
                             }
                             binance_order_book_locked.clone()
                         };
-                        binance_buf.push_back(now.elapsed().as_micros());
+                        (*Arc::get_mut(&mut binance_metrics).unwrap()).buffer_push_back(now.elapsed().as_micros());
                         tx.send(OrderBookUpdate {
                             pair: BTCUSD,
                             book:  book_update}).ok();
