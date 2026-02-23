@@ -18,6 +18,8 @@ use tokio::{
     time::{Duration, interval, timeout},
 };
 use tokio_tungstenite::{connect_async, tungstenite::Message};
+use tracing::{debug, error, info, info_span, trace, warn};
+use tracing_subscriber;
 
 type String2 = (String, String);
 type String3 = (String, String, String);
@@ -85,6 +87,15 @@ fn percentiles(buffer: &CircularBuffer<200, u128>) -> Option<(u128, u128, u128)>
 
 #[tokio::main]
 async fn main() -> Result<(), AppError> {
+    // Initialize tracing subscriber
+    tracing_subscriber::fmt()
+        .with_target(false)
+        .with_thread_ids(true)
+        .with_level(true)
+        .compact()
+        .init();
+
+    info!("Starting order book aggregator");
     // binance connection
     let binance_url = "wss://stream.binance.com:9443/ws/btcusdt@depth10@100ms";
     let (mut binance_ws_socket, _) =
@@ -123,6 +134,8 @@ async fn main() -> Result<(), AppError> {
     loop {
         select! {
             Some(msg_res) = binance_ws_socket.next() => {
+                let span = info_span!("binance_message");
+                let _enter = span.enter();
                 let msg_recv = msg_res?;
                 match msg_recv {
                     Message::Text(msg_recv_text) => {
@@ -153,6 +166,8 @@ async fn main() -> Result<(), AppError> {
                 }
             }
             Some(msg_res) = kraken_ws_socket.next() => {
+                let span = info_span!("kraken_message");
+                let _enter = span.enter();
                 let msg_recv = msg_res?;
                 match msg_recv {
                     Message::Text(msg_recv_text) => {
@@ -247,22 +262,26 @@ async fn main() -> Result<(), AppError> {
             }
             _ = interval.tick() => {
                 ticks += 1;
-                println!("Mesages received from binance / sec: {}", binance_msg_no/ticks);
-                println!("Percentiles Binance: P50, P95, P99 (microseconds) {:?}", percentiles(&binance_buf));
-                println!("{}", *binance_order_book.lock().await);
-                println!("Mesages received from kraken: / sec: {}", kraken_msg_no/ticks);
-                println!("Percentiles Kraken: P50, P95, P99 (microseconds) {:?}", percentiles(&kraken_buf));
-                println!("{}", *kraken_order_book.lock().await);
+                info!("Mesages received from binance / sec: {}", binance_msg_no/ticks);
+                info!("Percentiles Binance: P50, P95, P99 (microseconds) {:?}", percentiles(&binance_buf));
+                info!("{}", *binance_order_book.lock().await);
+                info!("Mesages received from kraken: / sec: {}", kraken_msg_no/ticks);
+                info!("Percentiles Kraken: P50, P95, P99 (microseconds) {:?}", percentiles(&kraken_buf));
+                info!("{}", *kraken_order_book.lock().await);
             }
-            Ok((tcp_stream, _addr)) = listener.accept() => {
-                println!("Client connected!");
+            Ok((tcp_stream, addr)) = listener.accept() => {
                 let mut rx = tx.subscribe();
                 tokio::spawn(async move {
+                    let span = info_span!("client_handler", client_id = ?addr);
+                    span.in_scope(|| {
+                        info!("Client connected!");
+                    });
                     let mut subscriptions: HashSet<Pair> = HashSet::new();
                     if let Ok(mut ws_stream) = tokio_tungstenite::accept_async(tcp_stream).await {
                         loop {
                             select! {
                                 rx_receive = rx.recv() => {
+                                    let _enter = span.enter();
                                     match rx_receive {
                                         Ok(update) => {
                                             if subscriptions.contains(&update.pair) {
@@ -273,33 +292,33 @@ async fn main() -> Result<(), AppError> {
                                             }
                                         }
                                         Err(RecvError::Lagged(n)) => {
-                                            println!("Client lagged, skipped {} messages", n);
+                                            warn!(skipped = n, "client lagged");
                                             continue;
                                         }
                                         Err(_) => break,
                                     }
                                 }
                                 ws_stream_receive = ws_stream.next() => {
+                                    let _enter = span.enter();
                                     match ws_stream_receive {
                                         Some(Ok(Message::Text(msg_recv))) => {
-                                            println!("Raw message from client: {}", msg_recv);
                                                 match serde_json::from_str::<ClientMessage>(&msg_recv) {
                                                     Ok(client_message) => {
                                                         if client_message.action == "subscribe" {
                                                             subscriptions.insert(client_message.pair.clone());
-                                                            println!("Client subscribed to {:?}", client_message.pair);
+                                                            info!(client_message = ?client_message.pair, "client subscribed");
                                                         } else if client_message.action == "unsubscribe" {
                                                             subscriptions.remove(&client_message.pair);
                                                         }
                                                     }
                                                     Err(e) => {
-                                                        println!("Client message error: {}", e);
+                                                        error!(error = %e, "failed to parse client message");
                                                     }
                                                 }
                                         }
                                         Some(Ok(_)) => {}
                                         Some(Err(e)) => {
-                                            println!("WebSocker error: {}", e);
+                                            error!(error = %e, "websocket error");
                                             break;
                                         }
                                         None => {
